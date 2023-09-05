@@ -19,6 +19,7 @@
 #include "config.h"
 
 /**********************************************************************************************/
+bool mqtt_use = MQTT_USE; // define use of MQTT
 const char* mqtt_server = MQTT_SERVER; //CHANGE MQTT Broker address
 uint16_t mqtt_port = MQTT_PORT; // define MQTT port
 String mqtt_user = MQTT_USER; //not used, make a change in the mqtt initializer
@@ -27,12 +28,13 @@ String ssid = WIFI_SSID;             // CHANGE (WiFi Name)
 String pwd = WIFI_PASSWD;            // CHANGE (WiFi password)
 String sensor_location = LOCATION; // define sensor location
 
-#define sw_version 10 // Define Software Version
+
+#define sw_version 11 // Define Software Version
 
 // sensor settings
 const int hum_threshold = 70; // In percentage, If soil humidity under
                               // hum_threshold it will trigger the watering
-const int hum_offset = 1071;  // define humidity offset in raw ticks, measure by putting
+const int hum_offset = 1000;  // define humidity offset in raw ticks, measure by putting
                               // sensor into water and take this raw value as offset
 
 // OTA management
@@ -47,7 +49,7 @@ const char* timeZone = "CET-1CEST,M3.5.0,M10.5.0/3";
 // watering time
 const int watering_hour_am = 7;       // 7 am
 const int watering_hour_pm = 19;      // 7 pm
-const int watering_time = 120 * 1000;  // in milli seconds
+const int watering_time = 5 * 1000;  // in milli seconds
 
 // *** Hardware Definitions ***
 #define Pin_pump 33         // define esp pin for triggering pump
@@ -56,7 +58,7 @@ const int watering_time = 120 * 1000;  // in milli seconds
 // when wifi active only ADC1 available GPIO32 - GPIO39
 
 
-uint64_t uS_TO_S_FACTOR = 1000000; //Conversion factor for micro seconds to seconds 
+uint64_t uS_TO_S_FACTOR = 1000000; //Conversion factor for micro seconds to seconds
 #define wifi_timeout 5000L  // 5 seconds in milliseconds
 
 // *** persistent data ***
@@ -92,8 +94,7 @@ void setup_wifi() {
         delay(10);
         Serial.print(".");
         wifi_setup_timer++;
-        if (wifi_setup_timer >
-            999) {  // Restart the ESP if no connection can be established
+        if (wifi_setup_timer > 999) {  // Restart the ESP if no connection can be established
             ESP.restart();
         }
     }
@@ -103,7 +104,7 @@ void setup_wifi() {
 }
 
 void check_for_OTA(){
-  new_update_available = false;  
+  new_update_available = false;
   String fwURL = String( fwUrlBase );
   String fwVersionURL = fwURL;
   fwVersionURL.concat( "firmware.version" );
@@ -158,7 +159,9 @@ void goToDeepSleep(uint64_t sleepTime_sec) {
     // testing
     // sleepTime_sec = 30;
     log_i("Going to sleep for %f seconds", (double)sleepTime_sec);
-    client.disconnect();
+    if (mqtt_use) {
+        client.disconnect();
+    }
     delay(300);
     WiFi.disconnect(true);
     WiFi.mode(WIFI_OFF);
@@ -236,7 +239,7 @@ bool isTimeToWater() {
     char strftime_buf[64];
     strftime(strftime_buf, sizeof(strftime_buf), "%c", &curr_time);
 
-    if (curr_time.tm_mday == last_watering_time.tm_mday && 
+    if (curr_time.tm_mday == last_watering_time.tm_mday &&
                 curr_time.tm_hour == last_watering_time.tm_hour){
       strftime(strftime_buf, sizeof(strftime_buf), "%c", &last_watering_time);
       log_i("Just watered at %s, go back to sleep", strftime_buf);
@@ -245,13 +248,13 @@ bool isTimeToWater() {
         curr_time.tm_hour == watering_hour_pm) {
         log_i("It's time to water the plants");
         return true;
-    } 
+    }
     log_i("Don't water yet it's only %s", strftime_buf);
     return false;
 }
 
 uint64_t setSleepTime() {
-    uint64_t sleepTimeS = 43000;  // define standard as about 12h 
+    uint64_t sleepTimeS = 43000;  // define standard as about 12h
     time(&now);
     struct tm curr_time;
     localtime_r(&now, &curr_time);
@@ -296,7 +299,7 @@ uint64_t setSleepTime() {
         strftime(strftime_buf, sizeof(strftime_buf), "%c", &morning);
         log_i("Time to water in the morning: %s", strftime_buf);
     }
- 
+
     sleepTimeS = (uint64_t)seconds;
     //sleepTimeS = (uint64_t) 300; // to debug, wake up every 5min
     log_i("Set sleep time to %f [s]", (double)sleepTimeS);
@@ -331,7 +334,7 @@ void setLastWateringTime() {
 void reconnect() {
     // keep track of when we started our attempt to get a wifi connection
     unsigned long startAttemptTime = millis();
-    while (!client.connected() && millis() - startAttemptTime < wifi_timeout) {
+    while (mqtt_use && !client.connected() && millis() - startAttemptTime < wifi_timeout) {
         log_i("Attempting MQTT connection...");
         char id[mac.length() + 1];
         mac.toCharArray(id, mac.length() + 1);
@@ -351,14 +354,16 @@ float measure_battery_level() {
 }
 
 void setup() {
-    delay(200); //Helps with common issue that ESP32 is not waking up after deep sleep 
+    delay(200); //Helps with common issue that ESP32 is not waking up after deep sleep
     Serial.begin(115200);
     pinMode(Pin_pump, OUTPUT);
 
     log_i("Setup");
     // Wifi
     setup_wifi();                         // connect to wifi
-    client.setServer(mqtt_server, 1883);  // connect wo MQTT server
+    if (mqtt_use) {
+        client.setServer(mqtt_server, 1883);  // connect wo MQTT server
+    }
     MAC_ADDRESS = WiFi.macAddress();      // get MAC address
     Serial.println(MAC_ADDRESS);
     mac = MAC_ADDRESS.substring(9, 11) + MAC_ADDRESS.substring(12, 14) +
@@ -390,19 +395,21 @@ void setup() {
     log_i("Raw Soil Sensor value: %d", hum_raw);
     float soil_hum = map(hum_raw, hum_offset, 4095.0f, 100, 0);
     log_i("Moisture: %.1f %%", soil_hum);
-    client.publish(
-        (sensor_topic + "/Humidity").c_str(),
-        ("SOIL_RH,site=" + sensor_location + " value=" + String(soil_hum))
-            .c_str(),
-        false);
-    client.publish(
-        (sensor_topic + "/BatteryVoltage").c_str(),
-        ("BatteryVoltage,site=" + sensor_location + " value=" + String(measure_battery_level())).c_str(),
-        false);
-    client.publish(
-            (sensor_topic + "/SoftwareVS").c_str(),
-            ("SoftwareVS,site=" + sensor_location + " value=" + String(sw_version)).c_str(),
+    if (mqtt_use) {
+        client.publish(
+            (sensor_topic + "/Humidity").c_str(),
+            ("SOIL_RH,site=" + sensor_location + " value=" + String(soil_hum))
+                .c_str(),
             false);
+        client.publish(
+            (sensor_topic + "/BatteryVoltage").c_str(),
+            ("BatteryVoltage,site=" + sensor_location + " value=" + String(measure_battery_level())).c_str(),
+            false);
+        client.publish(
+                (sensor_topic + "/SoftwareVS").c_str(),
+                ("SoftwareVS,site=" + sensor_location + " value=" + String(sw_version)).c_str(),
+                false);
+    }
     log_i("MQTT Published Soil RH, Battery Voltage and Software Version: %d", sw_version);
     delay(100);
 
@@ -417,37 +424,45 @@ void setup() {
             if (!client.connected() && WiFi.status() == WL_CONNECTED) {
                 reconnect();
             }
-            
-            client.publish(
-                (sensor_topic + "/Watered").c_str(),
-                ("WATERED,site=" + sensor_location + " value=" + String(1))
-                    .c_str(),
-                false);
+
+            if (mqtt_use) {
+                client.publish(
+                    (sensor_topic + "/Watered").c_str(),
+                    ("WATERED,site=" + sensor_location + " value=" + String(1))
+                        .c_str(),
+                    false);
+            }
             log_i("Publish watered data");
             delay(500);
 
         } else {
-            client.publish(
-                (sensor_topic + "/Watered").c_str(),
-                ("WATERED,site=" + sensor_location + " value=" + String(0))
-                    .c_str(),
-                false);
+            if (mqtt_use) {
+                client.publish(
+                    (sensor_topic + "/Watered").c_str(),
+                    ("WATERED,site=" + sensor_location + " value=" + String(0))
+                        .c_str(),
+                    false);
+            }
             log_i("MQTT Publish too humid, did not water plant");
             delay(300);
         }
     } else {
-        client.publish(
-            (sensor_topic + "/Watered").c_str(),
-            ("WATERED,site=" + sensor_location + " value=" + String(0)).c_str(),
-            false);
+        if (mqtt_use) {
+            client.publish(
+                (sensor_topic + "/Watered").c_str(),
+                ("WATERED,site=" + sensor_location + " value=" + String(0)).c_str(),
+                false);
+        }
         log_i("MQTT Publish Woke up too early");
         delay(300);
     }
-    
-    if (!client.connected() && WiFi.status() == WL_CONNECTED) {
+
+    if (mqtt_use && !client.connected() && WiFi.status() == WL_CONNECTED) {
         reconnect();
     }
-    client.loop();
+    if (mqtt_use) {
+        client.loop();
+    }
     check_for_OTA();
     goToDeepSleep(setSleepTime());
 }
